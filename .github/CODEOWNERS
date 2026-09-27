@@ -1,0 +1,28 @@
+# Code owners (ADR-0008 §9, ADR-0010 §4).
+# Personal repository: every area is owned by @Dilipkumarkesavalu for now. When the repo
+# moves to a GitHub organization, split these into teams (architecture, backend,
+# platform-team, billing-team, hrms-team, frontend-core, devops). Later rules win.
+
+*                                   @Dilipkumarkesavalu
+
+# Backend
+/backend/                           @Dilipkumarkesavalu
+/backend/src/varanasi/platform/     @Dilipkumarkesavalu
+/backend/src/varanasi/billing/      @Dilipkumarkesavalu
+/backend/src/varanasi/hrms/         @Dilipkumarkesavalu
+/backend/src/varanasi/shared/       @Dilipkumarkesavalu
+/backend/src/varanasi/*/contract/   @Dilipkumarkesavalu
+/backend/src/varanasi/*/migrations/ @Dilipkumarkesavalu
+
+# Frontend
+/apps/platform/                     @Dilipkumarkesavalu
+/apps/billing/                      @Dilipkumarkesavalu
+/apps/hrms/                         @Dilipkumarkesavalu
+/packages/                          @Dilipkumarkesavalu
+
+# Infrastructure, CI and decisions
+/infra/                             @Dilipkumarkesavalu
+/.github/                           @Dilipkumarkesavalu
+/docker-compose.yml                 @Dilipkumarkesavalu
+/docs/adr/                          @Dilipkumarkesavalu
+/docs/architecture/                 @Dilipkumarkesavalu

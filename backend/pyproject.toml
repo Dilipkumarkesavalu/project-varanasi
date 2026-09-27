@@ -1,0 +1,144 @@
+[project]
+name = "varanasi"
+version = "0.1.0"
+description = "Varanasi backend: Platform, Billing and HRMS modules (one modular application, ADR-0001)"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "pydantic>=2.9",
+  "pydantic-settings>=2.6",
+  "sqlalchemy[asyncio]>=2.0.36",
+  "psycopg[binary]>=3.2",
+  "alembic>=1.14",
+  "redis>=5.2",
+  "boto3>=1.35",
+  "structlog>=24.4",
+  "asyncpg>=0.30",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "pytest-cov>=6.0",
+  "pytest-xdist>=3.6",
+  "httpx>=0.28",
+  "testcontainers>=4.8",
+  "ruff>=0.8",
+  "mypy>=1.13",
+  "boto3-stubs[s3]>=1.35",
+  "import-linter>=2.1",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/varanasi"]
+
+[tool.uv]
+package = true
+
+# ---------------------------------------------------------------- ruff (ADR-0008 §1)
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E", "W", "F", "I", "N", "UP", "B", "S", "A", "C4", "DTZ", "T20", "SIM",
+  "RET", "PTH", "ERA", "PL", "RUF", "ASYNC", "BLE", "TRY",
+]
+ignore = [
+  "PLR0913",  # FastAPI dependencies legitimately take many parameters
+  "TRY003",   # clear messages at the raise site are fine
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["varanasi", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004", "S105", "S106"]
+# Migrations build DDL from module constants, never from user input.
+"src/varanasi/*/migrations/versions/*" = ["N999", "S608"]
+
+# ---------------------------------------------------------------- mypy (ADR-0008 §1)
+[tool.mypy]
+python_version = "3.13"
+strict = true
+mypy_path = "src:."
+explicit_package_bases = true
+files = ["src", "tests"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["testcontainers.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------- pytest (ADR-0009 §2)
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+addopts = "--strict-markers --strict-config -ra --import-mode=importlib"
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+  "unit: fast, isolated, no I/O",
+  "integration: real PostgreSQL/Redis/object storage via Testcontainers",
+  "contract: module contracts, event schemas, OpenAPI conformance",
+  "security: tenant isolation, authn/authz, RLS, schema lint",
+  "migration: Alembic upgrade/downgrade/drift",
+  "e2e: full running stack",
+]
+
+[tool.coverage.run]
+source = ["varanasi"]
+branch = true
+
+# ---------------------------------------------------------------- import-linter (ADR-0008 §3)
+[tool.importlinter]
+root_package = "varanasi"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "shared has no business-module dependencies"
+type = "forbidden"
+source_modules = ["varanasi.shared"]
+forbidden_modules = ["varanasi.platform", "varanasi.billing", "varanasi.hrms"]
+
+[[tool.importlinter.contracts]]
+name = "billing uses other modules only through their contract"
+type = "forbidden"
+source_modules = ["varanasi.billing"]
+forbidden_modules = ["varanasi.platform.internal", "varanasi.hrms.internal"]
+
+[[tool.importlinter.contracts]]
+name = "hrms uses other modules only through their contract"
+type = "forbidden"
+source_modules = ["varanasi.hrms"]
+forbidden_modules = ["varanasi.platform.internal", "varanasi.billing.internal"]
+
+[[tool.importlinter.contracts]]
+name = "platform never calls billing/hrms APIs (events only)"
+type = "forbidden"
+source_modules = ["varanasi.platform"]
+forbidden_modules = [
+  "varanasi.billing.internal", "varanasi.billing.contract.api",
+  "varanasi.hrms.internal", "varanasi.hrms.contract.api",
+]
+
+[[tool.importlinter.contracts]]
+name = "domain layer is framework-free"
+type = "forbidden"
+source_modules = [
+  "varanasi.platform.internal.domain",
+  "varanasi.billing.internal.domain",
+  "varanasi.hrms.internal.domain",
+]
+forbidden_modules = ["fastapi", "sqlalchemy", "redis", "boto3"]
+allow_indirect_imports = true

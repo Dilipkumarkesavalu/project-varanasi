@@ -1,0 +1,17 @@
+# Normalise line endings so Windows and Linux (CI, Docker) see identical files.
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.ttf binary
+*.woff2 binary
+
+# Generated files: collapse in PR diffs.
+backend/uv.lock linguist-generated=true
+pubspec.lock linguist-generated=true
+docs/api/openapi.json linguist-generated=true

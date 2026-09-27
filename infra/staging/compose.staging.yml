@@ -1,0 +1,57 @@
+# Staging stack on the app server (M1-FOU-012). Started only by deploy.sh.
+# PostgreSQL is RDS and files are S3 (ADR-0011); Redis runs here as a container.
+# IMAGE_TAG and ECR_REGISTRY come from deploy.sh; app settings from /opt/varanasi/app.env.
+
+name: varanasi
+
+services:
+  migrate:
+    image: ${ECR_REGISTRY}/varanasi-backend:${IMAGE_TAG}
+    env_file: /opt/varanasi/app.env
+    command:
+      - sh
+      - -c
+      - alembic -n platform upgrade head && alembic -n billing upgrade head && alembic -n hrms upgrade head
+    restart: "no"
+    profiles: ["migrate"]
+
+  backend:
+    image: ${ECR_REGISTRY}/varanasi-backend:${IMAGE_TAG}
+    env_file: /opt/varanasi/app.env
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  web:
+    image: ${ECR_REGISTRY}/varanasi-web:${IMAGE_TAG}
+    ports:
+      - "80:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *logging
+
+  redis:
+    image: redis:7.4.11-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  redis-data:

@@ -1,0 +1,101 @@
+# Local development stack (M1-FOU-007/008/009).
+#
+#   cp .env.example .env
+#   docker compose up -d                          # PostgreSQL, Redis, RustFS (S3) with data volumes
+#   docker compose --profile app up -d --build    # + migrations + backend API on :8000
+#
+# Host ports default to 55432 / 56379 / 59000 so they don't clash with other local
+# projects; change them in .env (VARANASI_*_HOST_PORT). All images are pinned.
+# Data survives restarts in named volumes; `docker compose down -v` wipes it.
+
+name: varanasi
+
+services:
+  postgres:
+    image: postgres:17.11
+    env_file: .env
+    ports:
+      - "${VARANASI_PG_HOST_PORT:-55432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4.11-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${VARANASI_REDIS_HOST_PORT:-56379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # S3-compatible local storage. MinIO no longer publishes images, so we use RustFS (ADR-0012).
+  storage:
+    image: rustfs/rustfs:1.0.0
+    environment:
+      RUSTFS_ACCESS_KEY: ${VARANASI_STORAGE_ACCESS_KEY_ID}
+      RUSTFS_SECRET_KEY: ${VARANASI_STORAGE_SECRET_ACCESS_KEY}
+    ports:
+      - "${VARANASI_STORAGE_HOST_PORT:-59000}:9000"   # S3 API
+      - "${VARANASI_STORAGE_CONSOLE_HOST_PORT:-59001}:9001"   # web console
+    volumes:
+      - storage-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    profiles: ["app"]
+    build: ./backend
+    image: varanasi-backend:local
+    env_file: .env
+    environment: &in-network
+      VARANASI_DB_MIGRATOR_URL: postgresql://varanasi_migrator:${VARANASI_DB_MIGRATOR_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      VARANASI_DB_PLATFORM_URL: postgresql://varanasi_platform_app:${VARANASI_DB_PLATFORM_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      VARANASI_DB_BILLING_URL: postgresql://varanasi_billing_app:${VARANASI_DB_BILLING_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      VARANASI_DB_HRMS_URL: postgresql://varanasi_hrms_app:${VARANASI_DB_HRMS_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      VARANASI_REDIS_URL: redis://redis:6379/0
+      VARANASI_STORAGE_ENDPOINT_URL: http://storage:9000
+      VARANASI_LOG_FORMAT: json
+    command:
+      - sh
+      - -c
+      - alembic -n platform upgrade head && alembic -n billing upgrade head && alembic -n hrms upgrade head
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  backend:
+    profiles: ["app"]
+    image: varanasi-backend:local
+    env_file: .env
+    environment: *in-network
+    ports:
+      - "${VARANASI_API_HOST_PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      storage:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  storage-data:

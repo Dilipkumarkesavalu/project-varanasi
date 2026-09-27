@@ -1,0 +1,185 @@
+# CI (M1-FOU-011, ADR-0009). Runs on every pull request and on pushes to main.
+# Branch protection requires the single "CI passed" check, which only succeeds when every
+# job below succeeded, so any failing check (including one broken test) blocks the merge.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call: # the staging deploy runs the full CI first
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_VERSION: "0.12.19"
+  PYTHON_VERSION: "3.13.15"
+  FLUTTER_VERSION: "3.47.5"
+  MELOS_VERSION: "8.9.0"
+
+jobs:
+  pr-title:
+    name: PR title is a Conventional Commit
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            refactor
+            test
+            perf
+            chore
+            ci
+            build
+            revert
+          scopes: |
+            platform
+            billing
+            hrms
+            shared
+            infra
+            deps
+            docs
+            adr
+          requireScope: true
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            git /repo --redact --verbose --exit-code 1
+
+  backend-static:
+    name: Backend · format, lint, types, boundaries
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - run: uv sync --locked
+      - name: Format check
+        run: uv run ruff format --check .
+      - name: Lint
+        run: uv run ruff check .
+      - name: Type check
+        run: uv run mypy
+      - name: Module boundaries (ADR-0003)
+        run: uv run lint-imports
+
+  backend-tests:
+    name: Backend · tests
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - run: uv sync --locked
+      - name: Unit tests
+        run: uv run pytest -m unit --cov=varanasi --cov-report=xml:coverage-unit.xml
+      # Testcontainers starts PostgreSQL, Redis and RustFS on the runner's Docker.
+      - name: Integration + migration tests
+        run: >
+          uv run pytest -m "integration or migration"
+          --cov=varanasi --cov-report=xml:coverage-integration.xml
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: backend-coverage
+          path: backend/coverage-*.xml
+          if-no-files-found: ignore
+
+  backend-image:
+    name: Backend · Docker build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: backend
+          push: false
+          load: true
+          tags: varanasi-backend:ci
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+      - name: Image runs as non-root and imports the app
+        run: |
+          test "$(docker run --rm --entrypoint id varanasi-backend:ci -u)" = "10001"
+          docker run --rm --entrypoint python varanasi-backend:ci -c "import varanasi.main"
+
+  flutter:
+    name: Flutter · format, analyze, test, build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Melos bootstrap
+        run: |
+          dart pub global activate melos ${{ env.MELOS_VERSION }}
+          melos bootstrap
+      - name: Format check
+        run: melos run format:check
+      - name: Analyze
+        run: melos run analyze
+      - name: Test
+        run: melos run test
+      - name: Build web apps
+        run: melos run build:web
+
+  ci-passed:
+    name: CI passed
+    if: always()
+    needs: [pr-title, secrets, backend-static, backend-tests, backend-image, flutter]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Every required job succeeded (skipped PR-title check allowed on push)
+        run: |
+          echo '${{ toJSON(needs) }}' > needs.json
+          python3 - <<'EOF'
+          import json, sys
+          needs = json.load(open("needs.json"))
+          bad = {name: job["result"] for name, job in needs.items()
+                 if job["result"] not in ("success", "skipped")
+                 or (job["result"] == "skipped" and name != "pr-title")}
+          if bad:
+              print("Failed or cancelled jobs:", bad)
+              sys.exit(1)
+          print("All jobs passed.")
+          EOF

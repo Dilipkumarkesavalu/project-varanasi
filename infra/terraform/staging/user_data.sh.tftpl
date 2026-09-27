@@ -1,0 +1,27 @@
+#!/bin/bash
+# First-boot setup of the staging app server (Amazon Linux 2023, arm64).
+# Installs Docker + Compose and writes the non-secret environment the deploy script reads.
+set -euo pipefail
+
+dnf install -y docker jq
+systemctl enable --now docker
+
+COMPOSE_VERSION="v5.5.1"
+mkdir -p /usr/local/lib/docker/cli-plugins
+curl -fsSL "https://github.com/docker/compose/releases/download/$${COMPOSE_VERSION}/docker-compose-linux-aarch64" \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+chmod 755 /usr/local/lib/docker/cli-plugins/docker-compose
+
+install -d -m 750 /opt/varanasi
+cat > /opt/varanasi/infra.env <<'EOF'
+AWS_REGION=${region}
+ECR_REGISTRY=${ecr_registry}
+DB_HOST=${db_host}
+DB_NAME=${db_name}
+DB_MASTER_SECRET_ARN=${db_master_secret}
+APP_SECRET_ARN=${app_secret}
+FILES_BUCKET=${files_bucket}
+DEPLOY_BUCKET=${deploy_bucket}
+PUBLIC_ORIGIN=${public_origin}
+EOF
+chmod 640 /opt/varanasi/infra.env

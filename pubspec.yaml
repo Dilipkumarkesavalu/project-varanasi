@@ -1,0 +1,40 @@
+# Flutter/Dart workspace root (M1-FOU-003). Pub workspaces + Melos link the three apps
+# with the shared packages, so they resolve one set of dependency versions together.
+#
+#   dart pub global activate melos
+#   melos bootstrap          # install + link everything
+#   melos run analyze        # static analysis, all packages
+#   melos run test           # unit/widget tests, all packages
+#   melos run build:web      # release web builds of the three apps
+
+name: varanasi_workspace
+publish_to: none
+
+environment:
+  sdk: ^3.13.0
+
+workspace:
+  - apps/platform
+  - apps/billing
+  - apps/hrms
+  - packages/core
+  - packages/ui
+
+dev_dependencies:
+  melos: ^8.9.0
+
+melos:
+  repository: https://github.com/Dilipkumarkesavalu/project-varanasi
+  scripts:
+    analyze:
+      description: Static analysis with warnings treated as errors.
+      run: melos exec -- flutter analyze --fatal-infos --fatal-warnings .
+    format:check:
+      description: Fails if any Dart file is not formatted.
+      run: dart format --output=none --set-exit-if-changed apps packages
+    test:
+      description: Unit and widget tests in every package that has a test/ folder.
+      run: melos exec --dir-exists=test -- flutter test
+    build:web:
+      description: Release web build of each app (staging uses infra/web/build-web.sh for base paths).
+      run: melos exec --scope="varanasi_*_app" -- flutter build web --release

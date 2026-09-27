@@ -1,0 +1,12 @@
+# Secret scanning config (ADR-0009 §3.4). Extends the default gitleaks rules.
+# Keep allowlist entries narrow and explain each one.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Example Idempotency-Key / request headers in API documentation are random UUIDs, not secrets"
+paths = ['''(^|/)docs/adr/[^/]+\.md$''']
+regexes = ['''(?i)idempotency-key:\s*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}''']
+regexTarget = "line"
+condition = "AND"

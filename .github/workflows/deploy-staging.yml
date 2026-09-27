@@ -1,0 +1,153 @@
+# Staging deploy (M1-FOU-012): pushing a version tag deploys backend + apps with no manual steps.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Flow: full CI -> build arm64 images -> push to ECR -> run infra/staging/deploy.sh on the
+# app server through SSM (migrations, restart, readiness check) -> smoke test the public URL.
+# AWS access is via GitHub OIDC; there are no AWS keys in GitHub (ADR-0011).
+name: Deploy staging
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false # never interrupt a deploy half-way
+
+env:
+  IMAGE_TAG: ${{ github.ref_name }}
+  FLUTTER_VERSION: "3.47.5"
+  MELOS_VERSION: "8.9.0"
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      pull-requests: read
+
+  build-backend:
+    needs: ci
+    runs-on: ubuntu-24.04
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: backend
+          platforms: linux/arm64 # Graviton app server (ADR-0011)
+          push: true
+          tags: ${{ vars.ECR_REGISTRY }}/varanasi-backend:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=backend-arm64
+          cache-to: type=gha,mode=max,scope=backend-arm64
+
+  build-web:
+    needs: ci
+    runs-on: ubuntu-24.04
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Build the three web apps (same-origin API)
+        run: |
+          dart pub global activate melos ${{ env.MELOS_VERSION }}
+          melos bootstrap
+          bash infra/web/build-web.sh /
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: infra/web/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ${{ vars.ECR_REGISTRY }}/varanasi-web:${{ env.IMAGE_TAG }}
+
+  deploy:
+    needs: [build-backend, build-web]
+    runs-on: ubuntu-24.04
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_URL }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Upload deploy bundle
+        run: |
+          prefix="s3://${{ vars.STAGING_DEPLOY_BUCKET }}/${IMAGE_TAG}"
+          aws s3 cp infra/staging/compose.staging.yml "$prefix/compose.staging.yml"
+          aws s3 cp infra/staging/deploy.sh "$prefix/deploy.sh"
+          aws s3 cp infra/postgres/bootstrap.sql "$prefix/bootstrap.sql"
+
+      - name: Run deploy.sh on the app server (SSM)
+        run: |
+          bucket="${{ vars.STAGING_DEPLOY_BUCKET }}"
+          commands=$(jq -cn --arg b "$bucket" --arg t "$IMAGE_TAG" '[
+            "set -euo pipefail",
+            "cd /opt/varanasi",
+            "for f in compose.staging.yml deploy.sh bootstrap.sql; do aws s3 cp s3://\($b)/\($t)/$f ./$f --only-show-errors; done",
+            "chmod 750 deploy.sh",
+            "./deploy.sh \($t)"
+          ]')
+          command_id=$(aws ssm send-command \
+            --instance-ids "${{ vars.STAGING_INSTANCE_ID }}" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy ${IMAGE_TAG}" \
+            --parameters "{\"commands\":${commands},\"executionTimeout\":[\"1200\"]}" \
+            --query Command.CommandId --output text)
+          echo "SSM command: $command_id"
+
+          status=Pending
+          for _ in $(seq 1 120); do
+            sleep 10
+            status=$(aws ssm get-command-invocation --command-id "$command_id" \
+              --instance-id "${{ vars.STAGING_INSTANCE_ID }}" --query Status --output text 2>/dev/null || echo Pending)
+            case "$status" in Pending|InProgress|Delayed) continue ;; *) break ;; esac
+          done
+
+          aws ssm get-command-invocation --command-id "$command_id" \
+            --instance-id "${{ vars.STAGING_INSTANCE_ID }}" \
+            --query '[StandardOutputContent, StandardErrorContent]' --output text
+          echo "Deploy status: $status"
+          test "$status" = "Success"
+
+      - name: Smoke test through the load balancer
+        run: |
+          for path in /health /health/ready /platform/ /billing/ /hrms/; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --retry 5 --retry-delay 3 "${{ vars.STAGING_URL }}$path")
+            echo "$path -> $code"
+            test "$code" = "200"
+          done

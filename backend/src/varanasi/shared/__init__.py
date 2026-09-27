@@ -1,0 +1,1 @@
+"""Technical building blocks only. No business logic (ADR-0008 §2)."""
