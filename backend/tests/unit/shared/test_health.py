@@ -27,7 +27,7 @@ async def test_health_returns_ok_without_touching_dependencies() -> None:
     async with _client(app) as client:
         response = await client.get("/health")
 
-    assert response.status_code == 200
+    assert response.status_code == 201  # DELIBERATELY BROKEN: proves CI blocks merges
     assert response.json() == {"status": "ok"}
     assert "x-correlation-id" in response.headers
 
